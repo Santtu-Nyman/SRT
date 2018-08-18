@@ -1,5 +1,5 @@
 /*
-	Serial Reader Tool version 0.0.0 2018-08-08 by Santtu Nyman.
+	Serial Reader Tool version 1.0.0 2018-08-18 by Santtu Nyman.
 
 	Description
 		Simple command line tool for readind data from serial port to file.
@@ -7,11 +7,14 @@
 		Code of the program is not commented. I may add comments some day.
 		
 	Version history
+		version 1.0.0 2018-08-18
+			Added more arguments for controlling the serial port parameters.
 		version 0.0.0 2018-08-08
 			First publicly available version.
 
 */
 
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
 BOOL search_argument(SIZE_T argument_count, const WCHAR** argument_values, const WCHAR* short_argument, const WCHAR* long_argument, const WCHAR** value)
@@ -40,6 +43,31 @@ BOOL decode_integer_string(const WCHAR* string, DWORD* interger)
 			return FALSE;
 	*interger = result;
 	return TRUE;
+}
+
+DWORD query_dword_register_value(HKEY root_key, const WCHAR* sub_key_path, const WCHAR* value_name, DWORD* value)
+{
+	HKEY key;
+	DWORD error = (DWORD)RegOpenKeyExW(root_key, sub_key_path, 0, KEY_QUERY_VALUE, &key);
+	if (!error)
+	{
+		DWORD value_type;
+		DWORD value_size = sizeof(DWORD);
+		DWORD temporal_value;
+		error = (DWORD)RegQueryValueExW(key, value_name, 0, &value_type, (BYTE*)&temporal_value, &value_size);
+		RegCloseKey(key);
+		if (!error)
+		{
+			if (value_type == REG_DWORD && value_size == sizeof(DWORD))
+			{
+				*value = temporal_value;
+				return 0;
+			}
+			else
+				return ERROR_INVALID_DATATYPE;
+		}
+	}
+	return error;
 }
 
 DWORD get_arguments(HANDLE heap, SIZE_T* argument_count, const WCHAR*** argument_values)
@@ -98,8 +126,10 @@ DWORD set_file_size(HANDLE file_handle, LARGE_INTEGER size)
 	return error;
 }
 
-DWORD open_serial_port(const WCHAR* serial_port_name, DWORD baud_rate, BOOL overlapped, COMMTIMEOUTS* timeouts, HANDLE* serial_port_handle)
+DWORD open_serial_port(const WCHAR* serial_port_name, DWORD baud_rate, DWORD data_bit_count, DWORD parity, DWORD stop_bit_count, BOOL overlapped, COMMTIMEOUTS* timeouts, HANDLE* serial_port_handle)
 {
+	if (data_bit_count < 4 || data_bit_count > 8 || parity > 2 || stop_bit_count < 1 || stop_bit_count > 2)
+		return ERROR_INVALID_PARAMETER;
 	WCHAR serial_port_full_name[16];
 	if (serial_port_name[0] == L'\\' && serial_port_name[1] == L'\\' && serial_port_name[2] == L'.' && serial_port_name[3] == L'\\' && serial_port_name[4] == L'C' && serial_port_name[5] == L'O' && serial_port_name[6] == L'M' && serial_port_name[7] >= L'0' && serial_port_name[7] <= L'9')
 	{
@@ -120,7 +150,7 @@ DWORD open_serial_port(const WCHAR* serial_port_name, DWORD baud_rate, BOOL over
 	{
 		SIZE_T port_number_digit_count = 1;
 		while (serial_port_name[3 + port_number_digit_count])
-			if (serial_port_name[3 + port_number_digit_count] >= L'0' || serial_port_name[7 + port_number_digit_count] <= L'9')
+			if (serial_port_name[3 + port_number_digit_count] >= L'0' || serial_port_name[3 + port_number_digit_count] <= L'9')
 				++port_number_digit_count;
 			else
 				return ERROR_INVALID_NAME;
@@ -172,11 +202,11 @@ DWORD open_serial_port(const WCHAR* serial_port_name, DWORD baud_rate, BOOL over
 		}
 	}
 	serial_configuration->dcb.BaudRate = baud_rate;
-	serial_configuration->dcb.ByteSize = 8;
-	serial_configuration->dcb.StopBits = ONESTOPBIT;
-	serial_configuration->dcb.Parity = NOPARITY;
+	serial_configuration->dcb.ByteSize = (BYTE)data_bit_count;
+	serial_configuration->dcb.Parity = (BYTE)parity;
+	serial_configuration->dcb.StopBits = (stop_bit_count == 1) ? ONESTOPBIT : TWOSTOPBITS;
 	serial_configuration->dcb.fDtrControl = DTR_CONTROL_ENABLE;
-	COMMTIMEOUTS serial_timeouts = { 0x800, 0x800, 0x800, 0x800, 0x800 };
+	COMMTIMEOUTS serial_timeouts = { 0, 0, 0, 0, 0 };
 	HANDLE handle = CreateFileW(serial_port_full_name, GENERIC_READ, 0, 0, OPEN_EXISTING, overlapped ? FILE_FLAG_OVERLAPPED : 0, 0);
 	if (handle == INVALID_HANDLE_VALUE)
 	{
@@ -263,11 +293,14 @@ DWORD print_help(HANDLE console)
 		L"Parameter List:\n"
 		L"	-h or --help Displays help message.\n"
 		L"	-p or --serial_port Specifies the serial port which the data is streamed from.\n"
-		L"	-b or --baud_rate Specifies the bound rate for the serial port.\n"
-		L"	-o or --output Specifies the ouput file which the data will be streamed to.\n"
+		L"	-b or --baud_rate Specifies the bound rate for the serial port. If this argument is not given, bound rate is set to 9600.\n"
+		L"	-o or --output Specifies the ouput file which the data will be streamed to. If no output file is specified the data will be streamed to console.\n"
 		L"	-f or --flush_rate Specifies time in seconds which the data is flushed to output. This parameter is ignored if type of the output file is not FILE_TYPE_DISK\n"
 		L"	-a or --append If this argument is given the data is appended to end of output file. This parameter is ignored if type of the output file is not FILE_TYPE_DISK\n"
-		L"	-s or --buffer_size Recommended size for programs buffer where, data is stored between reading it from the serial port and writing it to the output file.\n");
+		L"	--buffer_size Recommended size for programs buffer where, data is stored between reading it from the serial port and writing it to the output file.\n"
+		L"	--data_bit_count Specifies data bit count for the serial port. If this argument is not given, data bit count is set to 8.\n"
+		L"	--parity Specifies parity(0 or N is no parity, 1 or O is odd, 2 or E is even) for the serial port. If this argument is not given, parity is set to no parity.\n"
+		L"	--stop_bit_count Specifies stop bit count for the serial port. This value can be 1 or 2. If this argument is not given, stop bit count is set to 1.\n");
 }
 
 typedef struct configuration_t
@@ -275,6 +308,9 @@ typedef struct configuration_t
 	HANDLE heap;
 	DWORD flush_rate;
 	DWORD baud_rate;
+	DWORD data_bit_count;
+	DWORD parity;
+	DWORD stop_bit_count;
 	WCHAR* serial_port_name;
 	WCHAR* output_file_name;
 	HANDLE console_output;
@@ -288,11 +324,22 @@ typedef struct configuration_t
 
 DWORD get_process_configuration(configuration_t** process_configuration)
 {
-	const DWORD default_baud_rate = 9600;
-	const DWORD default_flush_rate = 0;
-	const DWORD default_buffer_size = 0x10000;
 	const WCHAR* console_output_name = L"CONOUT$";
 	const SIZE_T configuration_structure_size = (sizeof(configuration_t) + (sizeof(UINT_PTR) - 1)) & ~(sizeof(UINT_PTR) - 1);
+	DWORD default_baud_rate = 9600;
+	DWORD default_data_bit_count = 8;
+	DWORD default_parity = 0;
+	DWORD default_stop_bit_count = 1;
+	DWORD default_flush_rate = 0;
+	DWORD default_buffer_size = 0x10000;
+	DWORD accept_short_argumets = 0;
+	query_dword_register_value(HKEY_CURRENT_USER, L"Software\\Santtu Nyman\\srt", L"default_baud_rate", &default_baud_rate);
+	query_dword_register_value(HKEY_CURRENT_USER, L"Software\\Santtu Nyman\\srt", L"default_data_bit_count", &default_data_bit_count);
+	query_dword_register_value(HKEY_CURRENT_USER, L"Software\\Santtu Nyman\\srt", L"default_parity", &default_parity);
+	query_dword_register_value(HKEY_CURRENT_USER, L"Software\\Santtu Nyman\\srt", L"default_stop_bit_count", &default_stop_bit_count);
+	query_dword_register_value(HKEY_CURRENT_USER, L"Software\\Santtu Nyman\\srt", L"default_flush_rate", &default_flush_rate);
+	query_dword_register_value(HKEY_CURRENT_USER, L"Software\\Santtu Nyman\\srt", L"default_buffer_size", &default_buffer_size);
+	query_dword_register_value(HKEY_CURRENT_USER, L"Software\\Santtu Nyman\\srt", L"accept_short_argumets", &accept_short_argumets);
 	HANDLE heap = GetProcessHeap();
 	if (!heap)
 		return GetLastError();
@@ -317,6 +364,45 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 		CloseHandle(main_thread);
 		return error;
 	}
+	DWORD data_bit_count = default_data_bit_count;
+	const WCHAR* data_bit_count_string;
+	search_argument(argc, argv, 0, L"--data_bit_count", &data_bit_count_string);
+	if (data_bit_count_string && (!decode_integer_string(data_bit_count_string, &data_bit_count) || data_bit_count < 4 || data_bit_count > 8))
+	{
+		error = ERROR_BAD_ARGUMENTS;
+		HeapFree(heap, 0, (LPVOID)argv);
+		CloseHandle(main_thread);
+		return error;
+	}
+	DWORD parity = default_parity;
+	const WCHAR* parity_string;
+	search_argument(argc, argv, 0, L"--parity", &parity_string);
+	if (parity_string)
+	{
+		if (!lstrcmpiW(parity_string, L"N"))
+			parity = 0;
+		else if (!lstrcmpiW(parity_string, L"O"))
+			parity = 1;
+		else if (!lstrcmpiW(parity_string, L"E"))
+			parity = 2;
+		else if (!decode_integer_string(parity_string, &parity) || parity > 2)
+		{
+			error = ERROR_BAD_ARGUMENTS;
+			HeapFree(heap, 0, (LPVOID)argv);
+			CloseHandle(main_thread);
+			return error;
+		}
+	}
+	DWORD stop_bit_count = default_stop_bit_count;
+	const WCHAR* stop_bit_count_string;
+	search_argument(argc, argv, 0, L"--stop_bit_count", &stop_bit_count_string);
+	if (stop_bit_count_string && (!decode_integer_string(stop_bit_count_string, &stop_bit_count) || stop_bit_count < 1 || stop_bit_count > 2))
+	{
+		error = ERROR_BAD_ARGUMENTS;
+		HeapFree(heap, 0, (LPVOID)argv);
+		CloseHandle(main_thread);
+		return error;
+	}
 	DWORD flush_rate = default_flush_rate;
 	const WCHAR* flush_rate_string;
 	search_argument(argc, argv, L"-f", L"--flush_rate", &flush_rate_string);
@@ -329,7 +415,7 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	}
 	DWORD buffer_size = default_buffer_size;
 	const WCHAR* buffer_size_string;
-	search_argument(argc, argv, L"-s", L"--buffer_size", &buffer_size_string);
+	search_argument(argc, argv, 0, L"--buffer_size", &buffer_size_string);
 	if (buffer_size_string && !decode_integer_string(buffer_size_string, &buffer_size))
 	{
 		error = ERROR_BAD_ARGUMENTS;
@@ -339,6 +425,55 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	}
 	const WCHAR* serial_port_name;
 	search_argument(argc, argv, L"-p", L"--serial_port", &serial_port_name);
+	BOOL only_serial_port_number = FALSE;
+	if (!serial_port_name && accept_short_argumets && argc > 1)
+	{
+		serial_port_name = argv[1];
+		if (serial_port_name[0] == L'\\' && serial_port_name[1] == L'\\' && serial_port_name[2] == L'.' && serial_port_name[3] == L'\\' && serial_port_name[4] == L'C' && serial_port_name[5] == L'O' && serial_port_name[6] == L'M' && serial_port_name[7] >= L'0' && serial_port_name[7] <= L'9')
+		{
+			SIZE_T port_number_digit_count = 1;
+			while (serial_port_name && serial_port_name[7 + port_number_digit_count])
+				if (serial_port_name[7 + port_number_digit_count] >= L'0' || serial_port_name[7 + port_number_digit_count] <= L'9')
+					++port_number_digit_count;
+				else
+					serial_port_name = 0;
+			if (port_number_digit_count > 8)
+				serial_port_name = 0;
+		}
+		else if (serial_port_name[0] == L'C' && serial_port_name[1] == L'O' && serial_port_name[2] == L'M' && serial_port_name[3] >= L'0' && serial_port_name[3] <= L'9')
+		{
+			SIZE_T port_number_digit_count = 1;
+			while (serial_port_name && serial_port_name[3 + port_number_digit_count])
+				if (serial_port_name[3 + port_number_digit_count] >= L'0' || serial_port_name[3 + port_number_digit_count] <= L'9')
+					++port_number_digit_count;
+				else
+					serial_port_name = 0;
+			if (port_number_digit_count > 8)
+				serial_port_name = 0;
+		}
+		else if (serial_port_name[0] >= L'0' && serial_port_name[0] <= L'9')
+		{
+			SIZE_T port_number_digit_count = 1;
+			while (serial_port_name && serial_port_name[port_number_digit_count])
+				if (serial_port_name[port_number_digit_count] >= L'0' || serial_port_name[port_number_digit_count] <= L'9')
+					++port_number_digit_count;
+				else
+					serial_port_name = 0;
+			if (port_number_digit_count > 8)
+				serial_port_name = 0;
+			if (serial_port_name)
+				only_serial_port_number = TRUE;
+		}
+		else
+			serial_port_name = 0;
+	}
+	if (!serial_port_name)
+	{
+		error = ERROR_BAD_ARGUMENTS;
+		HeapFree(heap, 0, (LPVOID)argv);
+		CloseHandle(main_thread);
+		return error;
+	}
 	const WCHAR* output_file_name;
 	if (!search_argument(argc, argv, L"-o", L"--output", &output_file_name))
 		output_file_name = console_output_name;
@@ -351,8 +486,12 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	}
 	BOOL append = search_argument(argc, argv, L"-a", L"--append", 0);
 	BOOL help = search_argument(argc, argv, L"-h", L"--help", 0);
-	SIZE_T serial_port_name_size = serial_port_name ? lstrlenW(serial_port_name) + 1 : 0;
-	SIZE_T output_file_name_size = lstrlenW(output_file_name) + 1;
+	SIZE_T serial_port_name_size;
+	if (only_serial_port_number)
+		serial_port_name_size = 8 + (SIZE_T)lstrlenW(serial_port_name);
+	else
+		serial_port_name_size = serial_port_name ? (SIZE_T)lstrlenW(serial_port_name) + 1 : 0;
+	SIZE_T output_file_name_size = (SIZE_T)lstrlenW(output_file_name) + 1;
 	configuration_t* configuration = (configuration_t*)HeapAlloc(heap, 0, configuration_structure_size + ((serial_port_name_size + output_file_name_size) * sizeof(WCHAR)));
 	if (!configuration)
 	{
@@ -364,6 +503,9 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	configuration->heap = heap;
 	configuration->flush_rate = flush_rate;
 	configuration->baud_rate = baud_rate;
+	configuration->data_bit_count = data_bit_count;
+	configuration->parity = parity;
+	configuration->stop_bit_count = stop_bit_count;
 	configuration->serial_port_name = serial_port_name_size ? (WCHAR*)((UINT_PTR)configuration + configuration_structure_size) : 0;
 	configuration->output_file_name = (WCHAR*)((UINT_PTR)configuration + configuration_structure_size + (serial_port_name_size * sizeof(WCHAR)));
 	configuration->console_output = CreateFileW(console_output_name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
@@ -374,8 +516,16 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	configuration->help = help;
 	configuration->output_is_console = (BOOL)!lstrcmpiW(output_file_name, console_output_name);
 	if (configuration->serial_port_name)
-		for (WCHAR* r = (WCHAR*)serial_port_name, * w = (WCHAR*)configuration->serial_port_name, * e = r + serial_port_name_size; r != e; ++r, ++w)
-			*w = *r;
+		if (only_serial_port_number)
+		{
+			for (WCHAR* r = (WCHAR*)L"\\\\.\\COM", *w = (WCHAR*)configuration->serial_port_name, *e = r + 7; r != e; ++r, ++w)
+				*w = *r;
+			for (WCHAR* r = (WCHAR*)serial_port_name, *w = (WCHAR*)configuration->serial_port_name + 7, *e = r + serial_port_name_size - 7; r != e; ++r, ++w)
+				*w = *r;
+		}
+		else
+			for (WCHAR* r = (WCHAR*)serial_port_name, * w = (WCHAR*)configuration->serial_port_name, * e = r + serial_port_name_size; r != e; ++r, ++w)
+				*w = *r;
 	for (WCHAR* r = (WCHAR*)output_file_name, * w = (WCHAR*)configuration->output_file_name, * e = r + output_file_name_size; r != e; ++r, ++w)
 		*w = *r;
 	HeapFree(heap, 0, (LPVOID)argv);
@@ -480,14 +630,28 @@ int main()
 {
 	configuration_t* configuration;
 	DWORD error = get_process_configuration(&configuration);
-	if (error)
-		ExitProcess((UINT)error);
-	if (configuration->help || !configuration->serial_port_name)
+	if (error == ERROR_BAD_ARGUMENTS || (!error && configuration->help))
 	{
-		print_help(configuration->console_output);
-		free_configuration(configuration);
+		if (!error)
+		{
+			print_help(configuration->console_output);
+			free_configuration(configuration);
+		}
+		else
+		{
+			HANDLE error_console_output = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+			if (error_console_output != INVALID_HANDLE_VALUE)
+			{
+				print_help(error_console_output);
+				CloseHandle(error_console_output);
+			}
+			else
+				ExitProcess((UINT)GetLastError());
+		}
 		ExitProcess(0);
 	}
+	if (error)
+		ExitProcess((UINT)error);
 	volatile BOOL ctrl_c_event = FALSE;
 	if (configuration->console_output != INVALID_HANDLE_VALUE)
 	{
@@ -547,7 +711,7 @@ int main()
 		}
 	}
 	HANDLE input;
-	error = open_serial_port(configuration->serial_port_name, configuration->baud_rate, TRUE, 0, &input);
+	error = open_serial_port(configuration->serial_port_name, configuration->baud_rate, configuration->data_bit_count, configuration->parity, configuration->stop_bit_count, TRUE, 0, &input);
 	if (error)
 	{
 		print(configuration->console_output, L"Unable to open \"");
