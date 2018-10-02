@@ -1,5 +1,5 @@
 /*
-	Serial Reader Tool version 1.0.0 2018-08-18 by Santtu Nyman.
+	Serial Reader Tool version 1.1.0 2018-10-02 by Santtu Nyman.
 
 	Description
 		Simple command line tool for readind data from serial port to file.
@@ -7,7 +7,9 @@
 		Code of the program is not commented. I may add comments some day.
 		
 	Version history
-		version 1.0.0 2018-08-18
+		version 1.1.0 2018-10-02
+			Read single burst mode added.
+		version 1.0.0 2018-08-08
 			Added more arguments for controlling the serial port parameters.
 		version 0.0.0 2018-08-08
 			First publicly available version.
@@ -300,7 +302,8 @@ DWORD print_help(HANDLE console)
 		L"	--buffer_size Recommended size for programs buffer where, data is stored between reading it from the serial port and writing it to the output file.\n"
 		L"	--data_bit_count Specifies data bit count for the serial port. If this argument is not given, data bit count is set to 8.\n"
 		L"	--parity Specifies parity(0 or N is no parity, 1 or O is odd, 2 or E is even) for the serial port. If this argument is not given, parity is set to no parity.\n"
-		L"	--stop_bit_count Specifies stop bit count for the serial port. This value can be 1 or 2. If this argument is not given, stop bit count is set to 1.\n");
+		L"	--stop_bit_count Specifies stop bit count for the serial port. This value can be 1 or 2. If this argument is not given, stop bit count is set to 1.\n"
+		L"	--single_data_burst If this argument is given program stops streaming after reading single data burst from the serial port.\n");
 }
 
 typedef struct configuration_t
@@ -318,6 +321,7 @@ typedef struct configuration_t
 	SIZE_T buffer_size;
 	SYSTEM_INFO system_info;
 	BOOL append_to_output;
+	BOOL single_data_burst;
 	BOOL help;
 	BOOL output_is_console;
 } configuration_t;
@@ -485,6 +489,7 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 		return error;
 	}
 	BOOL append = search_argument(argc, argv, L"-a", L"--append", 0);
+	BOOL single_data_burst = search_argument(argc, argv, 0, L"--single_data_burst", 0);
 	BOOL help = search_argument(argc, argv, L"-h", L"--help", 0);
 	SIZE_T serial_port_name_size;
 	if (only_serial_port_number)
@@ -513,6 +518,7 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	configuration->buffer_size = (SIZE_T)buffer_size;
 	GetNativeSystemInfo(&configuration->system_info);
 	configuration->append_to_output = append;
+	configuration->single_data_burst = single_data_burst;
 	configuration->help = help;
 	configuration->output_is_console = (BOOL)!lstrcmpiW(output_file_name, console_output_name);
 	if (configuration->serial_port_name)
@@ -652,10 +658,10 @@ int main()
 	}
 	if (error)
 		ExitProcess((UINT)error);
-	volatile BOOL ctrl_c_event = FALSE;
+	volatile BOOL exit_event = FALSE;
 	if (configuration->console_output != INVALID_HANDLE_VALUE)
 	{
-		error = set_srt_ctrl_c_event_handler_data(configuration->main_thread, &ctrl_c_event);
+		error = set_srt_ctrl_c_event_handler_data(configuration->main_thread, &exit_event);
 		if (error)
 		{
 			print(configuration->console_output, L"Unable to set console control handler. ");
@@ -728,7 +734,11 @@ int main()
 	print(configuration->console_output, L"\" to \"");
 	print(configuration->console_output, configuration->output_file_name);
 	print(configuration->console_output, L"\".\n");
-	DWORD flush_rate_ms = configuration->flush_rate ? configuration->flush_rate * 1000 : INFINITE;
+	const DWORD data_burst_idle_limit = 256;
+	BOOL reading_data_burst = FALSE;
+	DWORD last_data_burst_read = 0;
+	DWORD flush_rate_ms = configuration->flush_rate ? (configuration->flush_rate * 1000) : INFINITE;
+	DWORD wait_ms = configuration->single_data_burst ? data_burst_idle_limit : flush_rate_ms;
 	DWORD previous_flush_time = configuration->flush_rate ? GetTickCount() : 0;
 	BOOL unflushed_output = FALSE;
 	volatile asynchronous_io_t asynchronous_read;
@@ -737,9 +747,9 @@ int main()
 	volatile asynchronous_io_t asynchronous_write;
 	asynchronous_write.operation_completed = FALSE;
 	asynchronous_write.operation_queued = FALSE;
-	while (!error && !ctrl_c_event)
+	while (!error && (!exit_event || read_buffer(buffer, buffer_size, buffer_read, buffer_write)))
 	{
-		if (!error && !asynchronous_read.operation_queued)
+		if (!error && !exit_event && !asynchronous_read.operation_queued)
 		{
 			SIZE_T read_maximum_size = write_buffer(buffer, buffer_size, buffer_read, buffer_write);
 			if (read_maximum_size)
@@ -789,7 +799,7 @@ int main()
 		}
 		if (!error)
 		{
-			DWORD sleep_result = SleepEx(flush_rate_ms, TRUE);
+			DWORD sleep_result = SleepEx(wait_ms, TRUE);
 			if (sleep_result == WAIT_IO_COMPLETION)
 			{
 				if (!error && asynchronous_read.operation_completed)
@@ -802,6 +812,11 @@ int main()
 							buffer_write = buffer;
 						asynchronous_read.operation_completed = FALSE;
 						asynchronous_read.operation_queued = FALSE;
+						if (configuration->single_data_burst && !reading_data_burst && asynchronous_read.bytes_transfered)
+						{
+							reading_data_burst = TRUE;
+							last_data_burst_read = GetTickCount();
+						}
 					}
 				}
 				if (!error && asynchronous_write.operation_completed)
@@ -814,6 +829,8 @@ int main()
 							buffer_read = buffer;
 						asynchronous_write.operation_completed = FALSE;
 						asynchronous_write.operation_queued = FALSE;
+						if (output_file_type == FILE_TYPE_DISK || output_file_type == FILE_TYPE_PIPE)
+							unflushed_output = TRUE;
 					}
 				}
 			}
@@ -829,6 +846,13 @@ int main()
 						error = GetLastError();
 				}
 			}
+			if (configuration->single_data_burst && reading_data_burst && !exit_event)
+			{
+				DWORD current_time = GetTickCount();
+				if (current_time - last_data_burst_read >= data_burst_idle_limit)
+					exit_event = TRUE;
+				last_data_burst_read = current_time;
+			}
 		}
 	}
 	if (asynchronous_read.operation_queued && !asynchronous_read.operation_completed)
@@ -840,7 +864,7 @@ int main()
 	{
 		CancelIo(output);
 		SleepEx(INFINITE, TRUE);
-		if (asynchronous_write.operation_completed && output_file_type == FILE_TYPE_DISK)
+		if (asynchronous_write.operation_completed && (output_file_type == FILE_TYPE_DISK || output_file_type == FILE_TYPE_PIPE))
 			unflushed_output = TRUE;
 	}
 	if (unflushed_output)
