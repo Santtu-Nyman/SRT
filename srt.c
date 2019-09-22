@@ -1,14 +1,15 @@
 /*
-	Serial Reader Tool version 1.1.0 2018-10-02 by Santtu Nyman.
+	Serial Reader Tool version 1.2.0 2019-09-22 by Santtu Nyman.
 
 	Description
-		Simple command line tool for readind data from serial port to file.
+		Simple command line tool for reading data from serial port to file.
 		Instructions how to use the program are contained in the program.
-		Code of the program is not commented. I may add comments some day.
 		
 	Version history
+		version 1.2.0 2019-09-22
+			Added capability to list all available serial port.
 		version 1.1.0 2018-10-02
-			Read single burst mode added.
+			Added read single burst mode.
 		version 1.0.0 2018-08-08
 			Added more arguments for controlling the serial port parameters.
 		version 0.0.0 2018-08-08
@@ -125,6 +126,160 @@ DWORD set_file_size(HANDLE file_handle, LARGE_INTEGER size)
 	DWORD error = SetEndOfFile(file_handle) ? 0 : GetLastError();
 	if ((file_pointer.LowPart != size.LowPart || file_pointer.HighPart != size.HighPart) && !SetFilePointerEx(file_handle, file_pointer, 0, FILE_BEGIN))
 		return error ? error : GetLastError();
+	return error;
+}
+
+BOOL get_serial_port_number_from_name(const WCHAR* serial_port_name, DWORD* serial_port_number)
+{
+	SIZE_T length = (SIZE_T)lstrlenW(serial_port_name);
+	DWORD port_number = 0;
+	DWORD temporal_port_number;
+	if (length < 4)
+		return 0;
+	if ((serial_port_name[0] == L'C' || serial_port_name[0] == L'c') &&
+		(serial_port_name[1] == L'O' || serial_port_name[1] == L'o') &&
+		(serial_port_name[2] == L'M' || serial_port_name[2] == L'm'))
+	{
+		for (SIZE_T digit_count = length - 3, digit_index = 0; digit_index != digit_count; ++digit_index)
+		{
+			if (serial_port_name[3 + digit_index] < L'0' || serial_port_name[3 + digit_index] > L'9')
+				return 0;
+			temporal_port_number = port_number * 10;
+			if (temporal_port_number / 10 != port_number)
+				return 0;
+			port_number = temporal_port_number;
+			temporal_port_number = port_number + (DWORD)(serial_port_name[3 + digit_index] - L'0');
+			if (temporal_port_number < port_number)
+				return 0;
+			port_number = temporal_port_number;
+		}
+		*serial_port_number = port_number;
+		return 1;
+	}
+	if (length < 8)
+		return 0;
+	if (serial_port_name[0] == L'\\' &&
+		serial_port_name[1] == L'\\' &&
+		serial_port_name[2] == L'.' &&
+		serial_port_name[3] == L'\\' &&
+		(serial_port_name[4] == L'C' || serial_port_name[4] == L'c') &&
+		(serial_port_name[5] == L'O' || serial_port_name[5] == L'o') &&
+		(serial_port_name[6] == L'M' || serial_port_name[6] == L'm'))
+	{
+		for (SIZE_T digit_count = length - 7, digit_index = 0; digit_index != digit_count; ++digit_index)
+		{
+			if (serial_port_name[7 + digit_index] < L'0' || serial_port_name[7 + digit_index] > L'9')
+				return 0;
+			temporal_port_number = port_number * 10;
+			if (temporal_port_number / 10 != port_number)
+				return 0;
+			port_number = temporal_port_number;
+			temporal_port_number = port_number + (DWORD)(serial_port_name[7 + digit_index] - L'0');
+			if (temporal_port_number < port_number)
+				return 0;
+			port_number = temporal_port_number;
+		}
+		*serial_port_number = port_number;
+		return 1;
+	}
+	return 0;
+}
+
+DWORD list_serial_ports(SIZE_T serial_port_number_buffer_length, DWORD* serial_port_number_buffer, SIZE_T* serial_port_count)
+{
+	const SIZE_T maximum_value_name_length = 16384;
+	HANDLE heap = GetProcessHeap();
+	if (!heap)
+		return ERROR_NOT_ENOUGH_MEMORY;
+	SIZE_T value_data_buffer_size = (2048 * sizeof(WCHAR));
+	void* value_buffer = HeapAlloc(heap, 0, (maximum_value_name_length * sizeof(WCHAR)) + value_data_buffer_size);
+	WCHAR* value_name_buffer = (WCHAR*)value_buffer;
+	WCHAR* value_data_buffer = (WCHAR*)((UINT_PTR)value_buffer + (maximum_value_name_length * sizeof(WCHAR)));
+	if (!value_buffer)
+		return ERROR_NOT_ENOUGH_MEMORY;
+	HKEY key;
+	DWORD error = (DWORD)RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DEVICEMAP\\SERIALCOMM", 0, KEY_QUERY_VALUE, &key);
+	if (error)
+	{
+		HeapFree(heap, 0, value_buffer);
+		return error;
+	}
+	SIZE_T port_count = 0;
+	for (DWORD serial_port_number, value_name_leght, value_type, value_data_size, value_index = 0; !error || error == ERROR_MORE_DATA; value_index = error ? value_index : (value_index + 1))
+	{
+		if (error == ERROR_MORE_DATA)
+		{
+			value_data_buffer_size = ((((SIZE_T)value_data_size + (sizeof(WCHAR) - 1)) / sizeof(WCHAR)) * sizeof(WCHAR)) + sizeof(WCHAR);
+			void* new_value_buffer = (WCHAR*)HeapReAlloc(heap, 0, value_buffer, (maximum_value_name_length * sizeof(WCHAR)) + value_data_buffer_size);
+			if (!new_value_buffer)
+			{
+				RegCloseKey(key);
+				HeapFree(heap, 0, value_buffer);
+				return ERROR_NOT_ENOUGH_MEMORY;
+			}
+			value_name_buffer = (WCHAR*)new_value_buffer;
+			value_data_buffer = (WCHAR*)((UINT_PTR)new_value_buffer + (maximum_value_name_length * sizeof(WCHAR)));
+		}
+		else
+		{
+			value_name_leght = (DWORD)maximum_value_name_length;
+			value_data_size = (DWORD)value_data_buffer_size - sizeof(WCHAR);
+			error = (DWORD)RegEnumValueW(key, value_index, value_name_buffer, &value_name_leght, 0, &value_type, (BYTE*)value_data_buffer, &value_data_size);
+			if (!error && value_type == REG_SZ)
+			{
+				DWORD value_data_length = (DWORD)(value_data_size / sizeof(WCHAR));
+				if (value_data_length)
+				{
+					if (value_data_buffer[value_data_length - 1] == 0)
+						--value_data_length;
+					else
+						value_data_buffer[value_data_length] = 0;
+				}
+				else
+					*value_name_buffer = 0;
+				if (get_serial_port_number_from_name(value_data_buffer, &serial_port_number))
+				{
+					if (port_count < serial_port_number_buffer_length)
+						serial_port_number_buffer[port_count] = serial_port_number;
+					++port_count;
+				}
+			}
+		}
+	}
+	RegCloseKey(key);
+	HeapFree(heap, 0, value_buffer);
+	if (error != ERROR_NO_MORE_ITEMS)
+		return error;
+	*serial_port_count = port_count;
+	return serial_port_number_buffer_length < port_count ? ERROR_INSUFFICIENT_BUFFER : 0;
+}
+
+DWORD create_serial_port_list(HANDLE heap, SIZE_T* serial_port_count, DWORD** serial_port_number_buffer)
+{
+	SIZE_T buffer_length = 1;
+	DWORD* buffer = (DWORD*)HeapAlloc(heap, 0, buffer_length * sizeof(DWORD));
+	if (!buffer)
+		return ERROR_NOT_ENOUGH_MEMORY;
+	DWORD error = ERROR_INSUFFICIENT_BUFFER;
+	while (error == ERROR_INSUFFICIENT_BUFFER)
+	{
+		error = list_serial_ports(buffer_length, buffer, serial_port_count);
+		if (error == ERROR_INSUFFICIENT_BUFFER)
+		{
+			buffer_length = *serial_port_count;
+			DWORD* new_buffer = (DWORD*)HeapReAlloc(heap, 0, buffer, buffer_length * sizeof(DWORD));
+			if (!buffer)
+			{
+				HeapFree(heap, 0, buffer);
+				return ERROR_NOT_ENOUGH_MEMORY;
+			}
+			buffer = new_buffer;
+		}
+	}
+	if (!error)
+		*serial_port_number_buffer = buffer;
+	else
+		HeapFree(heap, 0, buffer);
 	return error;
 }
 
@@ -303,7 +458,8 @@ DWORD print_help(HANDLE console)
 		L"	--data_bit_count Specifies data bit count for the serial port. If this argument is not given, data bit count is set to 8.\n"
 		L"	--parity Specifies parity(0 or N is no parity, 1 or O is odd, 2 or E is even) for the serial port. If this argument is not given, parity is set to no parity.\n"
 		L"	--stop_bit_count Specifies stop bit count for the serial port. This value can be 1 or 2. If this argument is not given, stop bit count is set to 1.\n"
-		L"	--single_data_burst If this argument is given program stops streaming after reading single data burst from the serial port.\n");
+		L"	--single_data_burst If this argument is given program stops streaming after reading single data burst from the serial port.\n"
+		L"	--list_ports If this argument is given program lists all available serial port. No data is read from any ports when ports are listed.\n");
 }
 
 typedef struct configuration_t
@@ -322,6 +478,7 @@ typedef struct configuration_t
 	SYSTEM_INFO system_info;
 	BOOL append_to_output;
 	BOOL single_data_burst;
+	BOOL list_ports;
 	BOOL help;
 	BOOL output_is_console;
 } configuration_t;
@@ -358,6 +515,7 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 		CloseHandle(main_thread);
 		return error;
 	}
+	BOOL list_ports = search_argument(argc, argv, 0, L"--list_ports", 0);
 	DWORD baud_rate = default_baud_rate;
 	const WCHAR* baud_rate_string;
 	search_argument(argc, argv, L"-b", L"--baud_rate", &baud_rate_string);
@@ -473,20 +631,30 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	}
 	if (!serial_port_name)
 	{
-		error = ERROR_BAD_ARGUMENTS;
-		HeapFree(heap, 0, (LPVOID)argv);
-		CloseHandle(main_thread);
-		return error;
+		if (list_ports)
+			serial_port_name = L"";
+		else
+		{
+			error = ERROR_BAD_ARGUMENTS;
+			HeapFree(heap, 0, (LPVOID)argv);
+			CloseHandle(main_thread);
+			return error;
+		}
 	}
 	const WCHAR* output_file_name;
 	if (!search_argument(argc, argv, L"-o", L"--output", &output_file_name))
 		output_file_name = console_output_name;
 	else if (!output_file_name)
 	{
-		error = ERROR_BAD_ARGUMENTS;
-		HeapFree(heap, 0, (LPVOID)argv);
-		CloseHandle(main_thread);
-		return error;
+		if (list_ports)
+			serial_port_name = L"";
+		else
+		{
+			error = ERROR_BAD_ARGUMENTS;
+			HeapFree(heap, 0, (LPVOID)argv);
+			CloseHandle(main_thread);
+			return error;
+		}
 	}
 	BOOL append = search_argument(argc, argv, L"-a", L"--append", 0);
 	BOOL single_data_burst = search_argument(argc, argv, 0, L"--single_data_burst", 0);
@@ -519,6 +687,7 @@ DWORD get_process_configuration(configuration_t** process_configuration)
 	GetNativeSystemInfo(&configuration->system_info);
 	configuration->append_to_output = append;
 	configuration->single_data_burst = single_data_burst;
+	configuration->list_ports = list_ports;
 	configuration->help = help;
 	configuration->output_is_console = (BOOL)!lstrcmpiW(output_file_name, console_output_name);
 	if (configuration->serial_port_name)
@@ -632,6 +801,44 @@ SIZE_T write_buffer(BYTE* buffer, SIZE_T size, BYTE* buffer_read, BYTE* buffer_w
 		return (SIZE_T)((UINT_PTR)maximum_buffer_write - (UINT_PTR)buffer_write);
 }
 
+DWORD print_available_serial_ports(HANDLE output)
+{
+	HANDLE heap = GetProcessHeap();
+	if (!heap)
+		return ERROR_NOT_ENOUGH_MEMORY;
+	WCHAR port_name_buffer[16];
+	SIZE_T port_count;
+	DWORD* port_number_buffer;
+	DWORD error = create_serial_port_list(heap, &port_count, &port_number_buffer);
+	if (error)
+		return error;
+	if (port_count)
+	{
+		port_name_buffer[0] = L'C';
+		port_name_buffer[1] = L'O';
+		port_name_buffer[2] = L'M';
+		for (SIZE_T port_index = 0; port_index != port_count; ++port_index)
+		{
+			DWORD port_number = port_number_buffer[port_index];
+			SIZE_T port_number_length = 0;
+			do
+			{
+				for (WCHAR* move = port_name_buffer + 3 + port_number_length++; move != port_name_buffer + 3; --move)
+					*move = *(move - 1);
+				port_name_buffer[3] = L'0' + (WCHAR)(port_number % 10);
+				port_number /= 10;
+			} while (port_number);
+			port_name_buffer[3 + port_number_length] = L'\n';
+			port_name_buffer[3 + port_number_length + 1] = 0;
+			print(output, port_name_buffer);
+		}
+	}
+	else
+		print(output, L"No available serial ports found\n");
+	HeapFree(heap, 0, port_number_buffer);
+	return 0;
+}
+
 int main()
 {
 	configuration_t* configuration;
@@ -658,6 +865,17 @@ int main()
 	}
 	if (error)
 		ExitProcess((UINT)error);
+	if (configuration->list_ports)
+	{
+		error = print_available_serial_ports(configuration->console_output);
+		if (error)
+		{
+			print(configuration->console_output, L"Unable to list available serial ports. ");
+			print_error(configuration->console_output, error);
+		}
+		free_configuration(configuration);
+		ExitProcess((UINT)error);
+	}
 	volatile BOOL exit_event = FALSE;
 	if (configuration->console_output != INVALID_HANDLE_VALUE)
 	{
